@@ -8,7 +8,12 @@ router = APIRouter(prefix="/v1/inference", tags=["inference"])
 
 @router.post("/jobs", response_model=CreateJobResponse)
 def create_inference_job(payload: CreateJobRequest) -> CreateJobResponse:
-    return inference_service.create_job(payload)
+    try:
+        return inference_service.create_job(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -17,4 +22,3 @@ def get_inference_job(job_id: str) -> JobStatusResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return job
-
