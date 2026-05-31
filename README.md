@@ -7,7 +7,8 @@ Current behavior:
 - exposes the endpoints already used by the Go backend
 - loads a real PyTorch checkpoint from `xray_diagnosis`
 - downloads uploaded X-ray images from MinIO using `object_key`
-- returns a platform-compatible result payload with `status`, `confidence`, `findings`, `recommendations`, `ai_analysis`, and raw per-label scores
+- returns a platform-compatible result payload with `status`, `confidence`, `findings`, `recommendations`, `ai_analysis`, and raw per-label scores plus model/image-quality metadata for deterministic report generation in the backend
+- respects transform settings stored in the training checkpoint, including 640px letterbox preprocessing for newer DenseNet-121 runs
 
 ## Endpoints
 
@@ -18,6 +19,7 @@ Current behavior:
 ## Required env
 
 - `MODEL_CHECKPOINT_PATH`: path to `best_checkpoint.pt` or an exported inference bundle
+- `MODEL_VERSION`: optional readable model/version identifier stored in generated reports
 - `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_USE_SSL`: same storage values used by the Go backend
 - `USE_MOCK=false` to enable real inference
 

@@ -80,23 +80,57 @@ class InferenceService:
                 "status": "Normal",
                 "confidence": 93,
                 "findings": [
-                    "No focal air-space opacity identified.",
-                    "Cardiomediastinal silhouette remains within expected size limits.",
-                    "Pleural spaces appear clear without visible effusion.",
+                    "No supported chest pathology exceeded the configured screening threshold in this mock result.",
+                    "Low-probability signals can still require clinical correlation if symptoms are present.",
                 ],
                 "recommendations": [
-                    "Continue routine clinical review.",
-                    "Escalate for radiologist validation if symptoms persist.",
+                    "Use this result as a screening aid and confirm through routine clinical review.",
+                    "Escalate for professional interpretation if symptoms persist or if image quality is limited.",
                 ],
                 "ai_analysis": (
-                    "This placeholder inference service completed a mock chest X-ray analysis and did not detect acute "
-                    "cardiopulmonary abnormality."
+                    "This placeholder inference service completed a mock chest X-ray screening workflow and did not identify high-probability supported findings."
                 ),
                 "raw": {
-                    "model": "placeholder-cnn",
-                    "scores": {
-                        "normal": 0.93,
-                        "abnormal": 0.07,
+                    "model_name": self._settings.model_name,
+                    "model_version": self._settings.model_version,
+                    "backbone": "densenet121",
+                    "label_order": [
+                        "Atelectasis",
+                        "Cardiomegaly",
+                        "Consolidation",
+                        "Pneumonia",
+                        "Pneumothorax",
+                    ],
+                    "probabilities": {
+                        "Atelectasis": 0.12,
+                        "Cardiomegaly": 0.11,
+                        "Consolidation": 0.09,
+                        "Pneumonia": 0.03,
+                        "Pneumothorax": 0.01,
+                    },
+                    "thresholds": {
+                        "Atelectasis": 0.5,
+                        "Cardiomegaly": 0.5,
+                        "Consolidation": 0.5,
+                        "Pneumonia": 0.5,
+                        "Pneumothorax": 0.5,
+                    },
+                    "predicted_positive_labels": [],
+                    "top_labels": [
+                        {"label": "Atelectasis", "probability": 0.12, "threshold": 0.5, "predicted_positive": False},
+                        {"label": "Cardiomegaly", "probability": 0.11, "threshold": 0.5, "predicted_positive": False},
+                        {"label": "Consolidation", "probability": 0.09, "threshold": 0.5, "predicted_positive": False},
+                    ],
+                    "image_quality": {
+                        "image_type": "jpeg",
+                        "quality_status": "ACCEPTABLE",
+                        "warnings": [],
+                        "width": 1024,
+                        "height": 1024,
+                    },
+                    "explainability": {
+                        "heatmap_url": None,
+                        "explanation_text": None,
                     },
                 },
             }

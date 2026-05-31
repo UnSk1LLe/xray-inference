@@ -20,6 +20,7 @@ class Settings:
     app_host: str
     app_port: int
     model_name: str
+    model_version: str
     use_mock: bool
     model_checkpoint_path: Path | None
     inference_device: str
@@ -39,6 +40,7 @@ def get_settings() -> Settings:
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=int(os.getenv("APP_PORT", "8010")),
         model_name=os.getenv("MODEL_NAME", "placeholder-cnn"),
+        model_version=os.getenv("MODEL_VERSION", "demo"),
         use_mock=_as_bool(os.getenv("USE_MOCK"), True),
         model_checkpoint_path=Path(checkpoint_path).expanduser() if checkpoint_path else None,
         inference_device=os.getenv("INFERENCE_DEVICE", "auto").strip().lower(),

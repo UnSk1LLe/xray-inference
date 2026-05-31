@@ -12,6 +12,7 @@ from minio.error import S3Error
 from PIL import Image
 from torch import nn
 from torchvision import models, transforms
+from torchvision.transforms import functional as TF
 from torchvision.transforms import InterpolationMode
 
 from app.core.config import Settings
@@ -44,8 +45,49 @@ class ModelMetadata:
     device: str
     num_classes: int
     image_size: int
+    resize_mode: str
+    pad_fill: int
     label_names: list[str]
     thresholds: list[float]
+
+
+class LetterboxSquare:
+    def __init__(
+        self,
+        size: int,
+        *,
+        fill: int = 0,
+        interpolation: InterpolationMode = InterpolationMode.BILINEAR,
+    ) -> None:
+        self.size = int(size)
+        self.fill = int(fill)
+        self.interpolation = interpolation
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        if width <= 0 or height <= 0:
+            return TF.resize(
+                image,
+                [self.size, self.size],
+                interpolation=self.interpolation,
+                antialias=True,
+            )
+
+        scale = min(self.size / float(width), self.size / float(height))
+        resized_width = max(1, int(round(width * scale)))
+        resized_height = max(1, int(round(height * scale)))
+        resized = TF.resize(
+            image,
+            [resized_height, resized_width],
+            interpolation=self.interpolation,
+            antialias=True,
+        )
+
+        background = Image.new(image.mode, (self.size, self.size), color=self.fill)
+        offset_x = (self.size - resized_width) // 2
+        offset_y = (self.size - resized_height) // 2
+        background.paste(resized, (offset_x, offset_y))
+        return background
 
 
 class LocalModelRuntime:
@@ -64,7 +106,19 @@ class LocalModelRuntime:
         )
 
         checkpoint = torch.load(self._checkpoint_path, map_location="cpu")
-        model_name, backbone, num_classes, dropout, image_size, normalize, label_names, thresholds, state_dict = (
+        (
+            model_name,
+            backbone,
+            num_classes,
+            dropout,
+            image_size,
+            resize_mode,
+            pad_fill,
+            normalize,
+            label_names,
+            thresholds,
+            state_dict,
+        ) = (
             self._parse_checkpoint(checkpoint)
         )
 
@@ -74,7 +128,12 @@ class LocalModelRuntime:
         if self._device.type == "cuda":
             self._model = self._model.to(memory_format=torch.channels_last)
 
-        self._transform = self._build_eval_transform(image_size=image_size, normalize=normalize)
+        self._transform = self._build_eval_transform(
+            image_size=image_size,
+            resize_mode=resize_mode,
+            pad_fill=pad_fill,
+            normalize=normalize,
+        )
         self.metadata = ModelMetadata(
             model_name=model_name,
             checkpoint_path=str(self._checkpoint_path.resolve()),
@@ -82,13 +141,17 @@ class LocalModelRuntime:
             device=str(self._device),
             num_classes=num_classes,
             image_size=image_size,
+            resize_mode=resize_mode,
+            pad_fill=pad_fill,
             label_names=label_names,
             thresholds=thresholds,
         )
 
     def predict(self, object_key: str) -> dict[str, Any]:
         image_bytes = self._download_image(object_key)
-        image = Image.open(BytesIO(image_bytes)).convert("L")
+        source_image = Image.open(BytesIO(image_bytes))
+        image_quality = self._assess_image_quality(source_image, object_key)
+        image = source_image.convert("L")
         tensor = self._transform(image).unsqueeze(0).to(self._device)
         if self._device.type == "cuda":
             tensor = tensor.contiguous(memory_format=torch.channels_last)
@@ -97,7 +160,7 @@ class LocalModelRuntime:
             logits = self._model(tensor)
             probabilities = torch.sigmoid(logits).squeeze(0).float().cpu().numpy()
 
-        return self._build_result(probabilities)
+        return self._build_result(probabilities, image_quality)
 
     def _download_image(self, object_key: str) -> bytes:
         try:
@@ -114,7 +177,7 @@ class LocalModelRuntime:
             response.close()
             response.release_conn()
 
-    def _build_result(self, probabilities: np.ndarray) -> dict[str, Any]:
+    def _build_result(self, probabilities: np.ndarray, image_quality: dict[str, Any]) -> dict[str, Any]:
         thresholds = np.asarray(self.metadata.thresholds, dtype=np.float32)
         positive_indices = [
             index
@@ -124,30 +187,30 @@ class LocalModelRuntime:
         positive_indices.sort(key=lambda index: float(probabilities[index]), reverse=True)
 
         if positive_indices:
-            status = "Abnormal"
+            status = "Review Recommended"
             reference_score = float(probabilities[positive_indices[0]])
             findings = [
                 (
-                    f"{self.metadata.label_names[index]} detected at "
-                    f"{float(probabilities[index]) * 100:.1f}% probability."
+                    f"The AI model detected image patterns that may be associated with {self.metadata.label_names[index]} "
+                    f"({float(probabilities[index]) * 100:.1f}% model probability)."
                 )
                 for index in positive_indices[: self._settings.top_k_findings]
             ]
             recommendations = [
-                "Recommend radiologist review of the highlighted abnormal findings.",
-                "Correlate this AI screen with symptoms, history, and formal clinical assessment.",
+                "Recommend review by a clinician or radiologist.",
+                "Interpret this AI screen together with symptoms, history, and formal clinical assessment.",
             ]
             ai_analysis = self._abnormal_summary(probabilities, positive_indices)
         else:
             status = "Normal"
             reference_score = float(1.0 - float(probabilities.max()) if probabilities.size else 1.0)
-            findings = ["No abnormal class exceeded its tuned decision threshold."]
+            findings = ["No supported finding exceeded the configured screening threshold in this AI analysis."]
             recommendations = [
                 "Use this result as a screening aid and confirm with routine clinical review.",
-                "Escalate for specialist interpretation if symptoms or history remain concerning.",
+                "Seek professional interpretation if symptoms, history, or image quality remain concerning.",
             ]
             ai_analysis = (
-                "The uploaded chest X-ray did not trigger any abnormal class above the model's tuned thresholds. "
+                "The uploaded chest X-ray did not trigger any supported finding above the model's configured thresholds. "
                 "This should be treated as a screening output rather than a final diagnosis."
             )
 
@@ -160,9 +223,11 @@ class LocalModelRuntime:
             "ai_analysis": ai_analysis,
             "raw": {
                 "model_name": self.metadata.model_name,
+                "model_version": self._settings.model_version,
                 "backbone": self.metadata.backbone,
                 "checkpoint_path": self.metadata.checkpoint_path,
                 "device": self.metadata.device,
+                "label_order": list(self.metadata.label_names),
                 "probabilities": {
                     label: float(probabilities[index])
                     for index, label in enumerate(self.metadata.label_names)
@@ -183,6 +248,11 @@ class LocalModelRuntime:
                     }
                     for index in top_indices
                 ],
+                "image_quality": image_quality,
+                "explainability": {
+                    "heatmap_url": None,
+                    "explanation_text": None,
+                },
             },
         }
 
@@ -194,14 +264,54 @@ class LocalModelRuntime:
             )
         joined = ", ".join(fragments)
         return (
-            "The uploaded chest X-ray crossed tuned thresholds for the following findings: "
-            f"{joined}. This is a classifier output and should be confirmed by a clinician or radiologist."
+            "The uploaded chest X-ray crossed configured screening thresholds for the following findings: "
+            f"{joined}. This is a decision-support output and should be confirmed by a clinician or radiologist."
         )
+
+    def _assess_image_quality(self, image: Image.Image, object_key: str) -> dict[str, Any]:
+        supported_formats = {"jpeg", "jpg", "png", "webp"}
+        image_format = (image.format or Path(object_key).suffix.lstrip(".") or "unknown").lower()
+        width, height = image.size
+        warnings: list[str] = []
+
+        grayscale = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+        contrast = float(grayscale.std()) if grayscale.size else 0.0
+
+        if image_format not in supported_formats:
+            warnings.append("Image format is outside the preferred PNG/JPEG/WebP set used during routine testing.")
+        if min(width, height) < 512:
+            warnings.append("Image resolution is limited and may reduce model reliability.")
+        if contrast < 0.12:
+            warnings.append("Image contrast appears low and subtle findings may be less reliable.")
+
+        quality_status = "ACCEPTABLE"
+        if warnings:
+            quality_status = "LOW_QUALITY"
+
+        return {
+            "image_type": image_format,
+            "quality_status": quality_status,
+            "warnings": warnings,
+            "width": width,
+            "height": height,
+        }
 
     def _parse_checkpoint(
         self,
         checkpoint: dict[str, Any],
-    ) -> tuple[str, str, int, float, int, dict[str, list[float]], list[str], list[float], dict[str, Any]]:
+    ) -> tuple[
+        str,
+        str,
+        int,
+        float,
+        int,
+        str,
+        int,
+        dict[str, list[float]],
+        list[str],
+        list[float],
+        dict[str, Any],
+    ]:
         config = checkpoint.get("config") or {}
 
         if "model_state_dict" in checkpoint:
@@ -211,6 +321,8 @@ class LocalModelRuntime:
             num_classes = int(model_config.get("num_classes") or len(NIH_TARGET_LABELS))
             dropout = float(model_config.get("dropout") or 0.0)
             image_size = int(transform_config.get("image_size") or 224)
+            resize_mode = str(transform_config.get("resize_mode") or "resize")
+            pad_fill = int(transform_config.get("pad_fill") or 0)
             normalize = {
                 "mean": list(transform_config.get("mean") or DEFAULT_MEAN),
                 "std": list(transform_config.get("std") or DEFAULT_STD),
@@ -225,6 +337,8 @@ class LocalModelRuntime:
                 num_classes,
                 dropout,
                 image_size,
+                resize_mode,
+                pad_fill,
                 normalize,
                 label_names,
                 [float(value) for value in thresholds],
@@ -239,6 +353,8 @@ class LocalModelRuntime:
         num_classes = int(bundle_config.get("num_classes") or len(checkpoint.get("label_names") or []))
         normalize = bundle_config.get("normalize") or {"mean": list(DEFAULT_MEAN), "std": list(DEFAULT_STD)}
         image_size = int((bundle_config.get("input_size") or [224, 224])[0])
+        resize_mode = str(bundle_config.get("resize_mode") or "resize")
+        pad_fill = int(bundle_config.get("pad_fill") or 0)
         label_names = list(checkpoint.get("label_names") or NIH_TARGET_LABELS[:num_classes])
         thresholds = checkpoint.get("thresholds") or [0.5] * len(label_names)
         model_name = self._settings.model_name or f"{backbone}-bundle"
@@ -248,6 +364,8 @@ class LocalModelRuntime:
             num_classes,
             0.0,
             image_size,
+            resize_mode,
+            pad_fill,
             {
                 "mean": list(normalize.get("mean") or DEFAULT_MEAN),
                 "std": list(normalize.get("std") or DEFAULT_STD),
@@ -296,17 +414,27 @@ class LocalModelRuntime:
         self,
         *,
         image_size: int,
+        resize_mode: str,
+        pad_fill: int,
         normalize: dict[str, list[float]],
     ) -> transforms.Compose:
         mean = tuple(float(value) for value in normalize.get("mean") or DEFAULT_MEAN)
         std = tuple(float(value) for value in normalize.get("std") or DEFAULT_STD)
+        if resize_mode == "letterbox":
+            resize = LetterboxSquare(
+                image_size,
+                fill=pad_fill,
+                interpolation=InterpolationMode.BILINEAR,
+            )
+        else:
+            resize = transforms.Resize(
+                (image_size, image_size),
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
         return transforms.Compose(
             [
-                transforms.Resize(
-                    (image_size, image_size),
-                    interpolation=InterpolationMode.BILINEAR,
-                    antialias=True,
-                ),
+                resize,
                 transforms.ToTensor(),
                 transforms.Lambda(lambda tensor: tensor[:1, :, :] if tensor.shape[0] > 1 else tensor),
                 transforms.Lambda(lambda tensor: tensor.repeat(3, 1, 1)),
